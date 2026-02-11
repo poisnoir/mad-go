@@ -17,7 +17,7 @@ type Mad[T any] struct {
 	hash            string
 }
 
-func NewMammd[T any]() (*Mad[T], error) {
+func NewMad[T any]() (*Mad[T], error) {
 	var zero T
 
 	m := &Mad[T]{}
@@ -42,8 +42,7 @@ func (m *Mad[T]) Encode(input *T, output []byte) (err error) {
 }
 
 func (m *Mad[T]) Decode(input []byte, output *T) (err error) {
-	m.decoder(unsafe.Pointer(output), &input)
-	return nil
+	return m.decoder(unsafe.Pointer(output), &input)
 }
 
 func generateFuncs(typ reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int, error) {
@@ -139,6 +138,9 @@ func eightByteStrat() (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]by
 			binary.BigEndian.PutUint64((*buffer)[0:8], *(*uint64)(pointer))
 			*buffer = (*buffer)[8:]
 		}, func(output unsafe.Pointer, buffer *[]byte) error {
+			if len(*buffer) < 8 {
+				return fmt.Errorf("buffer too small")
+			}
 			*(*uint64)(output) = binary.BigEndian.Uint64((*buffer)[0:8])
 			*buffer = (*buffer)[8:]
 			return nil
@@ -170,7 +172,7 @@ func stringStrat() (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte)
 			*buffer = (*buffer)[n:]
 			return nil
 		}, func(input unsafe.Pointer) int {
-			return len(*(*string)(input))
+			return len(*(*string)(input)) + 4
 		}
 }
 
