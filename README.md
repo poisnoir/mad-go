@@ -25,7 +25,6 @@ package main
 
 import (
     "fmt"
-    "unsafe"
     "github.com/poisnoir/mad"
 )
 
@@ -110,7 +109,7 @@ func main() {
     }
     
     // Calculate required buffer size
-    size := m.GetRequiredSize(unsafe.Pointer(&person))
+    size := m.GetRequiredSize(&person)
     buffer := make([]byte, size)
     
     // Encode
