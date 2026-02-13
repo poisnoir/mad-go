@@ -1,6 +1,7 @@
 package mad
 
 import (
+	"strings"
 	"testing"
 	"unsafe"
 )
@@ -85,7 +86,6 @@ func testRoundTrip[T comparable](t *testing.T, value T) {
 }
 
 func TestEmptyString(t *testing.T) {
-	// Test empty string separately due to size calculation bug
 	m, err := NewMad[string]()
 	if err != nil {
 		t.Fatalf("NewMad failed: %v", err)
@@ -94,10 +94,7 @@ func TestEmptyString(t *testing.T) {
 	emptyStr := ""
 	calculatedSize := m.sizefunc(unsafe.Pointer(&emptyStr))
 
-	// For empty string: calculated size = 0, but actual encoded size = 4 (length prefix)
-	t.Logf("Empty string calculated size: %d, actual encoded size needed: 4", calculatedSize)
-
-	buffer := make([]byte, 4) // Use correct size directly
+	buffer := make([]byte, calculatedSize)
 	err = m.Encode(&emptyStr, buffer)
 	if err != nil {
 		t.Fatalf("Encode failed for empty string: %v", err)
@@ -146,11 +143,9 @@ func TestStruct(t *testing.T) {
 		t.Fatalf("NewMammd failed: %v", err)
 	}
 
-	// This will have the wrong size due to string bug
 	calculatedSize := m.sizefunc(unsafe.Pointer(&value))
 	t.Logf("Struct with string calculated size: %d", calculatedSize)
 
-	// Use a larger buffer to avoid the panic
 	buffer := make([]byte, calculatedSize)
 
 	err = m.Encode(&value, buffer)
@@ -594,5 +589,559 @@ func BenchmarkDecodeStructWithArray(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = m.Decode(buffer, &decoded)
+	}
+}
+
+// Test GetRequiredSize method
+func TestGetRequiredSize(t *testing.T) {
+	t.Run("int32", func(t *testing.T) {
+		m, err := NewMad[int32]()
+		if err != nil {
+			t.Fatalf("NewMad failed: %v", err)
+		}
+		value := int32(42)
+		size := m.GetRequiredSize(&value)
+		if size != 4 {
+			t.Errorf("Expected 4 bytes for int32, got %d", size)
+		}
+	})
+
+	t.Run("string", func(t *testing.T) {
+		m, err := NewMad[string]()
+		if err != nil {
+			t.Fatalf("NewMad failed: %v", err)
+		}
+		value := "hello"
+		size := m.GetRequiredSize(&value)
+		expected := 4 + len(value) // 4 bytes for length prefix + string bytes
+		if size != expected {
+			t.Errorf("Expected %d bytes for string %q, got %d", expected, value, size)
+		}
+	})
+
+	t.Run("array", func(t *testing.T) {
+		m, err := NewMad[[3]int32]()
+		if err != nil {
+			t.Fatalf("NewMad failed: %v", err)
+		}
+		value := [3]int32{1, 2, 3}
+		size := m.GetRequiredSize(&value)
+		expected := 3 * 4 // 3 int32s, 4 bytes each
+		if size != expected {
+			t.Errorf("Expected %d bytes for [3]int32, got %d", expected, size)
+		}
+	})
+
+	t.Run("struct", func(t *testing.T) {
+		type SimpleStruct struct {
+			A int32
+			B bool
+		}
+		m, err := NewMad[SimpleStruct]()
+		if err != nil {
+			t.Fatalf("NewMad failed: %v", err)
+		}
+		value := SimpleStruct{A: 42, B: true}
+		size := m.GetRequiredSize(&value)
+		expected := 4 + 1 // int32 + bool
+		if size != expected {
+			t.Errorf("Expected %d bytes for SimpleStruct, got %d", expected, size)
+		}
+	})
+}
+
+// Test buffer underflow errors
+func TestDecoderBufferUnderflow(t *testing.T) {
+	t.Run("int64_underflow", func(t *testing.T) {
+		m, err := NewMad[int64]()
+		if err != nil {
+			t.Fatalf("NewMad failed: %v", err)
+		}
+		var result int64
+		err = m.Decode([]byte{1, 2}, &result) // Only 2 bytes, need 8
+		if err == nil {
+			t.Error("Expected buffer underflow error for int64")
+		}
+		if err != nil && err.Error() != "buffer too small" {
+			t.Errorf("Expected 'buffer too small' error, got: %v", err)
+		}
+	})
+
+	t.Run("int32_underflow", func(t *testing.T) {
+		m, err := NewMad[int32]()
+		if err != nil {
+			t.Fatalf("NewMad failed: %v", err)
+		}
+		var result int32
+		err = m.Decode([]byte{1, 2}, &result) // Only 2 bytes, need 4
+		if err == nil {
+			t.Error("Expected buffer underflow error for int32")
+		}
+	})
+
+	t.Run("int16_underflow", func(t *testing.T) {
+		m, err := NewMad[int16]()
+		if err != nil {
+			t.Fatalf("NewMad failed: %v", err)
+		}
+		var result int16
+		err = m.Decode([]byte{1}, &result) // Only 1 byte, need 2
+		if err == nil {
+			t.Error("Expected buffer underflow error for int16")
+		}
+	})
+
+	t.Run("string_length_underflow", func(t *testing.T) {
+		m, err := NewMad[string]()
+		if err != nil {
+			t.Fatalf("NewMad failed: %v", err)
+		}
+		var result string
+		err = m.Decode([]byte{1, 2}, &result) // Only 2 bytes, need 4 for length
+		if err == nil {
+			t.Error("Expected buffer underflow error for string length")
+		}
+	})
+
+	t.Run("string_content_underflow", func(t *testing.T) {
+		m, err := NewMad[string]()
+		if err != nil {
+			t.Fatalf("NewMad failed: %v", err)
+		}
+		var result string
+		// Length says 10 bytes, but only provide 2 after length prefix
+		buffer := []byte{0, 0, 0, 10, 'h', 'i'}
+		err = m.Decode(buffer, &result)
+		if err == nil {
+			t.Error("Expected buffer underflow error for string content")
+		}
+	})
+}
+
+// Test zero-length arrays
+func TestZeroLengthArray(t *testing.T) {
+	t.Run("zero_int_array", func(t *testing.T) {
+		testRoundTrip(t, [0]int32{})
+	})
+
+	t.Run("zero_string_array", func(t *testing.T) {
+		testRoundTrip(t, [0]string{})
+	})
+
+	t.Run("zero_bool_array", func(t *testing.T) {
+		testRoundTrip(t, [0]bool{})
+	})
+}
+
+// Test nested arrays
+func TestNestedArrays(t *testing.T) {
+	t.Run("2d_int_array", func(t *testing.T) {
+		testRoundTrip(t, [2][3]int32{{1, 2, 3}, {4, 5, 6}})
+	})
+
+	t.Run("3d_int_array", func(t *testing.T) {
+		testRoundTrip(t, [2][2][2]int8{{{1, 2}, {3, 4}}, {{5, 6}, {7, 8}}})
+	})
+
+	t.Run("nested_string_array", func(t *testing.T) {
+		testRoundTrip(t, [2][2]string{{"a", "b"}, {"c", "d"}})
+	})
+}
+
+// Test unsupported pointer and interface types
+func TestUnsupportedPointerTypes(t *testing.T) {
+	_, err := NewMad[*int32]()
+	if err == nil {
+		t.Error("Should reject pointer types")
+	}
+	if err != nil && !contains(err.Error(), "unsupported type") {
+		t.Errorf("Expected unsupported type error, got: %v", err)
+	}
+}
+
+func TestUnsupportedInterfaceTypes(t *testing.T) {
+	_, err := NewMad[interface{}]()
+	if err == nil {
+		t.Error("Should reject interface{} types")
+	}
+}
+
+// Helper function for error message checking
+func contains(str, substr string) bool {
+	return strings.Contains(str, substr)
+}
+
+// Test arrays of structs
+func TestArraysOfStructs(t *testing.T) {
+	type Point struct {
+		X int32
+		Y int32
+	}
+
+	points := [3]Point{{1, 2}, {3, 4}, {5, 6}}
+	testRoundTrip(t, points)
+}
+
+// Test deeply nested structs
+func TestDeeplyNestedStructs(t *testing.T) {
+	type Level3 struct {
+		Value int32
+	}
+	type Level2 struct {
+		L3 Level3
+		ID int16
+	}
+	type Level1 struct {
+		L2   Level2
+		Name string
+	}
+
+	nested := Level1{
+		L2: Level2{
+			L3: Level3{Value: 42},
+			ID: 123,
+		},
+		Name: "nested",
+	}
+
+	testRoundTrip(t, nested)
+}
+
+// Test struct with array fields
+func TestStructWithArrayFields(t *testing.T) {
+	type ArrayStruct struct {
+		Name   string
+		Scores [5]float32
+		Flags  [3]bool
+		IDs    [2]int64
+	}
+
+	value := ArrayStruct{
+		Name:   "test",
+		Scores: [5]float32{1.1, 2.2, 3.3, 4.4, 5.5},
+		Flags:  [3]bool{true, false, true},
+		IDs:    [2]int64{1000000000, 2000000000},
+	}
+
+	testRoundTrip(t, value)
+}
+
+// Test edge cases with strings
+func TestStringEdgeCases(t *testing.T) {
+	t.Run("very_long_string", func(t *testing.T) {
+		// Test with a long string
+		longStr := make([]byte, 1000)
+		for i := range longStr {
+			longStr[i] = byte('A' + (i % 26))
+		}
+		testRoundTrip(t, string(longStr))
+	})
+
+	t.Run("string_with_unicode", func(t *testing.T) {
+		testRoundTrip(t, "Hello 世界! 🎉 Тест")
+	})
+
+	t.Run("string_with_null_bytes", func(t *testing.T) {
+		testRoundTrip(t, "Hello\x00World\x00")
+	})
+}
+
+// Test boundary values
+func TestBoundaryValues(t *testing.T) {
+	t.Run("max_values", func(t *testing.T) {
+		testRoundTrip(t, int8(127))
+		testRoundTrip(t, int8(-128))
+		testRoundTrip(t, uint8(255))
+		testRoundTrip(t, int16(32767))
+		testRoundTrip(t, int16(-32768))
+		testRoundTrip(t, uint16(65535))
+		testRoundTrip(t, int32(2147483647))
+		testRoundTrip(t, int32(-2147483648))
+		testRoundTrip(t, uint32(4294967295))
+	})
+
+	t.Run("floating_point_special", func(t *testing.T) {
+		testRoundTrip(t, float32(0.0))
+		testRoundTrip(t, float32(-0.0))
+		testRoundTrip(t, float64(0.0))
+		testRoundTrip(t, float64(-0.0))
+	})
+}
+
+// Test named types vs anonymous types
+func TestNamedTypes(t *testing.T) {
+	type MyInt int32
+	type MyString string
+	type MyBool bool
+
+	testRoundTrip(t, MyInt(42))
+	testRoundTrip(t, MyString("hello"))
+	testRoundTrip(t, MyBool(true))
+}
+
+// Test struct field ordering
+func TestStructFieldOrdering(t *testing.T) {
+	// Fields should be encoded in alphabetical order
+	type OrderTest struct {
+		Zebra string
+		Alpha int32
+		Beta  bool
+		Gamma float64
+	}
+
+	value := OrderTest{
+		Zebra: "last",
+		Alpha: 1,
+		Beta:  true,
+		Gamma: 3.14,
+	}
+
+	testRoundTrip(t, value)
+}
+
+// Test empty struct edge cases
+func TestEmptyStructVariations(t *testing.T) {
+	type Empty1 struct{}
+	type Empty2 struct{}
+
+	testRoundTrip(t, Empty1{})
+	testRoundTrip(t, Empty2{})
+
+	// Array of empty structs
+	testRoundTrip(t, [3]Empty1{{}, {}, {}})
+}
+
+// Test array element decode error propagation
+func TestArrayDecodeErrorPropagation(t *testing.T) {
+	m, err := NewMad[[2]int32]()
+	if err != nil {
+		t.Fatalf("NewMad failed: %v", err)
+	}
+
+	var result [2]int32
+	// Buffer too small - should cause error in array element decoding
+	shortBuffer := []byte{0, 0, 0, 1} // Only 4 bytes, need 8 for [2]int32
+	err = m.Decode(shortBuffer, &result)
+	if err == nil {
+		t.Error("Expected error due to insufficient buffer for array elements")
+	}
+}
+
+// Test all supported numeric types with their strategies
+func TestNumericTypeStrategies(t *testing.T) {
+	t.Run("byte_strategy", func(t *testing.T) {
+		testRoundTrip(t, int8(42))
+		testRoundTrip(t, uint8(255))
+		testRoundTrip(t, true)
+		testRoundTrip(t, false)
+	})
+
+	t.Run("two_byte_strategy", func(t *testing.T) {
+		testRoundTrip(t, int16(12345))
+		testRoundTrip(t, uint16(54321))
+	})
+
+	t.Run("four_byte_strategy", func(t *testing.T) {
+		testRoundTrip(t, int32(123456789))
+		testRoundTrip(t, uint32(987654321))
+		testRoundTrip(t, float32(3.14159))
+	})
+
+	t.Run("eight_byte_strategy", func(t *testing.T) {
+		testRoundTrip(t, int64(1234567890123456))
+		testRoundTrip(t, uint64(9876543210987654))
+		testRoundTrip(t, float64(3.141592653589793))
+	})
+}
+
+// Test complex nested structures
+func TestComplexNestedStructures(t *testing.T) {
+	type Address struct {
+		Street  string
+		City    string
+		ZipCode int32
+	}
+
+	type Person struct {
+		Name    string
+		Age     int32
+		Address Address
+		Scores  [3]float64
+		Active  bool
+		Balance float64
+		Tags    [2]string
+	}
+
+	person := Person{
+		Name: "John Doe",
+		Age:  30,
+		Address: Address{
+			Street:  "123 Main St",
+			City:    "Anytown",
+			ZipCode: 12345,
+		},
+		Scores:  [3]float64{85.5, 92.0, 78.5},
+		Active:  true,
+		Balance: 1250.75,
+		Tags:    [2]string{"premium", "verified"},
+	}
+
+	testRoundTrip(t, person)
+}
+
+// Test buffer exact size boundary
+func TestBufferExactSizeBoundary(t *testing.T) {
+	m, err := NewMad[int64]()
+	if err != nil {
+		t.Fatalf("NewMad failed: %v", err)
+	}
+
+	value := int64(12345)
+	exactBuffer := make([]byte, 8) // Exactly the right size
+
+	err = m.Encode(&value, exactBuffer)
+	if err != nil {
+		t.Fatalf("Encode should succeed with exact buffer size: %v", err)
+	}
+
+	var decoded int64
+	err = m.Decode(exactBuffer, &decoded)
+	if err != nil {
+		t.Fatalf("Decode should succeed: %v", err)
+	}
+
+	if decoded != value {
+		t.Errorf("Expected %d, got %d", value, decoded)
+	}
+}
+
+// Test error messages consistency
+func TestErrorMessagesConsistency(t *testing.T) {
+	tests := []struct {
+		name        string
+		setupFunc   func() error
+		expectedMsg string
+	}{
+		{
+			name: "small_buffer_encode",
+			setupFunc: func() error {
+				m, _ := NewMad[int64]()
+				value := int64(123)
+				smallBuffer := make([]byte, 4)
+				return m.Encode(&value, smallBuffer)
+			},
+			expectedMsg: "output buffer too small",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.setupFunc()
+			if err == nil {
+				t.Error("Expected error but got none")
+			}
+			if err != nil && err.Error() != tt.expectedMsg {
+				t.Errorf("Expected error message %q, got %q", tt.expectedMsg, err.Error())
+			}
+		})
+	}
+}
+
+// Test Code() method for hash generation
+func TestCodeGeneration(t *testing.T) {
+	t.Run("int32_code", func(t *testing.T) {
+		m, err := NewMad[int32]()
+		if err != nil {
+			t.Fatalf("NewMad failed: %v", err)
+		}
+		code := m.Code()
+		if code != "2" { // fourByteStrat returns "2"
+			t.Errorf("Expected code '2' for int32, got '%s'", code)
+		}
+	})
+
+	t.Run("string_code", func(t *testing.T) {
+		m, err := NewMad[string]()
+		if err != nil {
+			t.Fatalf("NewMad failed: %v", err)
+		}
+		code := m.Code()
+		if code != "4" { // stringStrat returns "4"
+			t.Errorf("Expected code '4' for string, got '%s'", code)
+		}
+	})
+
+	t.Run("bool_code", func(t *testing.T) {
+		m, err := NewMad[bool]()
+		if err != nil {
+			t.Fatalf("NewMad failed: %v", err)
+		}
+		code := m.Code()
+		if code != "0" { // byteStrat returns "0"
+			t.Errorf("Expected code '0' for bool, got '%s'", code)
+		}
+	})
+
+	t.Run("array_code", func(t *testing.T) {
+		m, err := NewMad[[3]int32]()
+		if err != nil {
+			t.Fatalf("NewMad failed: %v", err)
+		}
+		code := m.Code()
+		if code != "52" { // arrStrat returns "5" + element code "2"
+			t.Errorf("Expected code '52' for [3]int32, got '%s'", code)
+		}
+	})
+
+	t.Run("struct_code", func(t *testing.T) {
+		type TestStruct struct {
+			A int32
+			B bool
+		}
+		m, err := NewMad[TestStruct]()
+		if err != nil {
+			t.Fatalf("NewMad failed: %v", err)
+		}
+		code := m.Code()
+		// Struct fields are sorted alphabetically: A (int32="2"), B (bool="0")
+		if code != "720" {
+			t.Errorf("Expected code '20' for TestStruct, got '%s'", code)
+		}
+	})
+
+	t.Run("nested_struct_code", func(t *testing.T) {
+		type Inner struct {
+			X int16
+		}
+		type Outer struct {
+			Inner Inner
+			Y     string
+		}
+		m, err := NewMad[Outer]()
+		if err != nil {
+			t.Fatalf("NewMad failed: %v", err)
+		}
+		code := m.Code()
+		// Fields sorted: Inner (struct with int16="1"), Y (string="4")
+		// So code should be "1" + "4" = "14"
+		if code != "7714" {
+			t.Errorf("Expected code '14' for nested struct, got '%s'", code)
+		}
+	})
+}
+
+// Test byte strategy buffer underflow to achieve 100% coverage
+func TestByteStrategyBufferUnderflow(t *testing.T) {
+	m, err := NewMad[int8]()
+	if err != nil {
+		t.Fatalf("NewMad failed: %v", err)
+	}
+	var result int8
+	err = m.Decode([]byte{}, &result) // Empty buffer, need 1 byte
+	if err == nil {
+		t.Error("Expected buffer underflow error for int8")
+	}
+	if err != nil && err.Error() != "buffer too small" {
+		t.Errorf("Expected 'buffer too small' error, got: %v", err)
 	}
 }

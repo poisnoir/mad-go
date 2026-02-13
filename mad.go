@@ -14,7 +14,11 @@ type Mad[T any] struct {
 	sizefunc        func(pointer unsafe.Pointer) int
 	fixedFieldsSize int
 	buffer          []byte
-	hash            string
+	code            string
+}
+
+func (m *Mad[T]) Code() string {
+	return m.code
 }
 
 func NewMad[T any]() (*Mad[T], error) {
@@ -22,7 +26,7 @@ func NewMad[T any]() (*Mad[T], error) {
 
 	m := &Mad[T]{}
 
-	encFn, decFn, sizefn, err := generateFuncs(reflect.TypeOf(zero))
+	encFn, decFn, sizefn, err, hash := generateFuncs(reflect.TypeOf(zero))
 	if err != nil {
 		return nil, err
 	}
@@ -30,7 +34,12 @@ func NewMad[T any]() (*Mad[T], error) {
 	m.encoder = encFn
 	m.decoder = decFn
 	m.sizefunc = sizefn
+	m.code = hash
 	return m, nil
+}
+
+func (m *Mad[T]) GetRequiredSize(input *T) int {
+	return m.sizefunc(unsafe.Pointer(input))
 }
 
 func (m *Mad[T]) Encode(input *T, output []byte) (err error) {
@@ -45,28 +54,34 @@ func (m *Mad[T]) Decode(input []byte, output *T) (err error) {
 	return m.decoder(unsafe.Pointer(output), &input)
 }
 
-func generateFuncs(typ reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int, error) {
+func generateFuncs(typ reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int, error, string) {
 
 	var enc func(unsafe.Pointer, *[]byte)
 	var dec func(unsafe.Pointer, *[]byte) error
 	var size func(pointer unsafe.Pointer) int
+	var code string
 	var err error
+
+	// Check for nil type (happens with interface{})
+	if typ == nil {
+		return nil, nil, nil, fmt.Errorf("unsupported type: <nil>, please refer to documentation for supported types"), ""
+	}
 
 	switch typ.Kind() {
 	case reflect.Int8, reflect.Bool, reflect.Uint8:
-		enc, dec, size = byteStrat()
+		enc, dec, size, code = byteStrat()
 	case reflect.Int16, reflect.Uint16:
-		enc, dec, size = twoByteStrat()
+		enc, dec, size, code = twoByteStrat()
 	case reflect.Int32, reflect.Uint32, reflect.Float32:
-		enc, dec, size = fourByteStrat()
+		enc, dec, size, code = fourByteStrat()
 	case reflect.Int64, reflect.Uint64, reflect.Float64:
-		enc, dec, size = eightByteStrat()
+		enc, dec, size, code = eightByteStrat()
 	case reflect.String:
-		enc, dec, size = stringStrat()
+		enc, dec, size, code = stringStrat()
 	case reflect.Struct:
-		enc, dec, size, err = structStrat(typ)
+		enc, dec, size, err, code = structStrat(typ)
 	case reflect.Array:
-		enc, dec, size, err = arrStrat(typ)
+		enc, dec, size, err, code = arrStrat(typ)
 	// Todo: Current implementation use slice header
 	// I am not sure how safe it is since it is deprecated.
 	// case reflect.Slice:
@@ -77,13 +92,13 @@ func generateFuncs(typ reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe
 	}
 
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, err, ""
 	}
 
-	return enc, dec, size, nil
+	return enc, dec, size, nil, code
 }
 
-func byteStrat() (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int) {
+func byteStrat() (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int, string) {
 	return func(input unsafe.Pointer, buffer *[]byte) {
 			(*buffer)[0] = *(*byte)(input)
 			*buffer = (*buffer)[1:]
@@ -97,11 +112,10 @@ func byteStrat() (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) e
 			return nil
 		}, func(unsafe.Pointer) int {
 			return 1
-		}
-
+		}, "0"
 }
 
-func twoByteStrat() (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int) {
+func twoByteStrat() (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int, string) {
 	return func(pointer unsafe.Pointer, buffer *[]byte) {
 			binary.BigEndian.PutUint16((*buffer)[0:2], *(*uint16)(pointer))
 			*buffer = (*buffer)[2:]
@@ -114,10 +128,10 @@ func twoByteStrat() (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte
 			return nil
 		}, func(unsafe.Pointer) int {
 			return 2
-		}
+		}, "1"
 }
 
-func fourByteStrat() (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int) {
+func fourByteStrat() (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int, string) {
 	return func(pointer unsafe.Pointer, buffer *[]byte) {
 			binary.BigEndian.PutUint32((*buffer)[0:4], *(*uint32)(pointer))
 			*buffer = (*buffer)[4:]
@@ -130,10 +144,10 @@ func fourByteStrat() (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byt
 			return nil
 		}, func(unsafe.Pointer) int {
 			return 4
-		}
+		}, "2"
 }
 
-func eightByteStrat() (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int) {
+func eightByteStrat() (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int, string) {
 	return func(pointer unsafe.Pointer, buffer *[]byte) {
 			binary.BigEndian.PutUint64((*buffer)[0:8], *(*uint64)(pointer))
 			*buffer = (*buffer)[8:]
@@ -146,13 +160,10 @@ func eightByteStrat() (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]by
 			return nil
 		}, func(unsafe.Pointer) int {
 			return 8
-		}
+		}, "3"
 }
 
-// Todo
-// Look and see if it is performant
-func stringStrat() (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int) {
-
+func stringStrat() (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int, string) {
 	return func(input unsafe.Pointer, buffer *[]byte) {
 			str := *(*string)(input)
 			n := len(str)
@@ -173,15 +184,14 @@ func stringStrat() (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte)
 			return nil
 		}, func(input unsafe.Pointer) int {
 			return len(*(*string)(input)) + 4
-		}
+		}, "4"
 }
 
-func arrStrat(t reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int, error) {
-
+func arrStrat(t reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int, error, string) {
 	elementType := t.Elem()
-	encElemFn, decElemFn, sizeElemFn, err := generateFuncs(elementType)
+	encElemFn, decElemFn, sizeElemFn, err, code := generateFuncs(elementType)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, err, ""
 	}
 
 	arrLen := t.Len()
@@ -209,15 +219,15 @@ func arrStrat(t reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Pointe
 				total += sizeElemFn(itemPtr)
 			}
 			return total
-		}, nil
+		}, nil, "5" + code
 }
 
-func sliceStrat(t reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int, error) {
+func sliceStrat(t reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int, error, string) {
 
 	elementType := t.Elem()
-	encElemFn, decElemFn, sizeElemFn, err := generateFuncs(elementType)
+	encElemFn, decElemFn, sizeElemFn, err, code := generateFuncs(elementType)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, err, ""
 	}
 
 	elemSize := elementType.Size()
@@ -261,10 +271,10 @@ func sliceStrat(t reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Poin
 				total += sizeElemFn(itemPtr)
 			}
 			return total
-		}, nil
+		}, nil, "6" + code
 }
 
-func structStrat(t reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int, error) {
+func structStrat(t reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int, error, string) {
 
 	type fieldMeta struct {
 		name   string
@@ -273,15 +283,16 @@ func structStrat(t reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Poi
 		enc    func(unsafe.Pointer, *[]byte)
 		dec    func(unsafe.Pointer, *[]byte) error
 		size   func(unsafe.Pointer) int
+		code   string
 	}
 
 	var fields []fieldMeta
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 
-		encFn, decFn, sizeFn, err := generateFuncs(f.Type)
+		encFn, decFn, sizeFn, err, code := generateFuncs(f.Type)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, err, ""
 		}
 		fields = append(fields, fieldMeta{
 			offset: f.Offset, // This is the byte-distance from the struct start
@@ -289,12 +300,19 @@ func structStrat(t reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Poi
 			enc:    encFn,
 			dec:    decFn,
 			size:   sizeFn,
+			code:   code,
 		})
 	}
 
 	sort.Slice(fields, func(i, j int) bool {
 		return fields[i].name < fields[j].name
 	})
+
+	// Generate the code for the struct
+	code := "7"
+	for i := 0; i < t.NumField(); i++ {
+		code += fields[i].code
+	}
 
 	return func(pointer unsafe.Pointer, buffer *[]byte) {
 			for _, field := range fields {
@@ -316,5 +334,5 @@ func structStrat(t reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Poi
 				total += field.size(fieldAddr)
 			}
 			return total
-		}, nil
+		}, nil, code
 }

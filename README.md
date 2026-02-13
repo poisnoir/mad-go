@@ -8,7 +8,6 @@ Mad is a Go serialization library that uses unsafe pointers for high-performance
 - **Type Safety**: Generic interface with compile-time type checking  
 - **Deterministic Encoding**: Struct fields are sorted alphabetically for consistent output
 - **Zero Allocation Decoding**: Direct memory manipulation for maximum performance
-- **Memory Layout**: Mad is independent of memory layout.
 
 ## Supported Types
 
@@ -111,7 +110,7 @@ func main() {
     }
     
     // Calculate required buffer size
-    size := m.sizefunc(unsafe.Pointer(&person))
+    size := m.GetRequiredSize(unsafe.Pointer(&person))
     buffer := make([]byte, size)
     
     // Encode
@@ -202,6 +201,5 @@ go test -v -run TestBufferValidation
 ## Installation
 
 ```bash
-go get github.com/poisnoir/mad
+go get github.com/poisnoir/mad-go
 ```
-
