@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 	"unsafe"
 )
@@ -14,10 +15,10 @@ type Mad[T any] struct {
 	sizefunc        func(pointer unsafe.Pointer) int
 	fixedFieldsSize int
 	buffer          []byte
-	code            string
+	code            []byte
 }
 
-func (m *Mad[T]) Code() string {
+func (m *Mad[T]) Code() []byte {
 	return m.code
 }
 
@@ -34,24 +35,37 @@ func NewMad[T any]() (*Mad[T], error) {
 	m.encoder = encFn
 	m.decoder = decFn
 	m.sizefunc = sizefn
-	m.code = hash
+	m.code = []byte(hash)
 	return m, nil
 }
 
 func (m *Mad[T]) GetRequiredSize(input *T) int {
-	return m.sizefunc(unsafe.Pointer(input))
+	return m.sizefunc(unsafe.Pointer(input)) + len(m.code)
 }
 
 func (m *Mad[T]) Encode(input *T, output []byte) (err error) {
-	if len(output) < m.sizefunc(unsafe.Pointer(input)) {
+	if len(output) < m.GetRequiredSize(input) {
 		return fmt.Errorf("output buffer too small")
 	}
-	m.encoder(unsafe.Pointer(input), &output)
+	buf := &output
+	copy((*buf)[:], m.code) // adding the code of structure to buffer
+
+	*buf = (*buf)[len(m.code):]
+	m.encoder(unsafe.Pointer(input), buf)
 	return nil
 }
 
 func (m *Mad[T]) Decode(input []byte, output *T) (err error) {
-	return m.decoder(unsafe.Pointer(output), &input)
+	if len(input) < len(m.code) {
+		return fmt.Errorf("buffer is either corrupted or generated from different data type")
+	}
+	if !slices.Equal(input[:len(m.code)], m.code) {
+		return fmt.Errorf("buffer is either corrupted or generated from different data type")
+	}
+	buf := &input
+	*buf = input[len(m.code):]
+
+	return m.decoder(unsafe.Pointer(output), buf)
 }
 
 func generateFuncs(typ reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int, error, string) {
@@ -62,7 +76,6 @@ func generateFuncs(typ reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe
 	var code string
 	var err error
 
-	// Check for nil type (happens with interface{})
 	if typ == nil {
 		return nil, nil, nil, fmt.Errorf("unsupported type: <nil>, please refer to documentation for supported types"), ""
 	}

@@ -1,9 +1,9 @@
 package mad
 
 import (
+	"slices"
 	"strings"
 	"testing"
-	"unsafe"
 )
 
 func TestBasicIntegerTypes(t *testing.T) {
@@ -63,7 +63,7 @@ func testRoundTrip[T comparable](t *testing.T, value T) {
 	}
 
 	// Calculate size
-	size := m.sizefunc(unsafe.Pointer(&value))
+	size := m.GetRequiredSize(&value)
 	buffer := make([]byte, size)
 
 	// Encode
@@ -92,7 +92,7 @@ func TestEmptyString(t *testing.T) {
 	}
 
 	emptyStr := ""
-	calculatedSize := m.sizefunc(unsafe.Pointer(&emptyStr))
+	calculatedSize := m.GetRequiredSize(&emptyStr)
 
 	buffer := make([]byte, calculatedSize)
 	err = m.Encode(&emptyStr, buffer)
@@ -143,7 +143,7 @@ func TestStruct(t *testing.T) {
 		t.Fatalf("NewMammd failed: %v", err)
 	}
 
-	calculatedSize := m.sizefunc(unsafe.Pointer(&value))
+	calculatedSize := m.GetRequiredSize(&value)
 	t.Logf("Struct with string calculated size: %d", calculatedSize)
 
 	buffer := make([]byte, calculatedSize)
@@ -238,7 +238,9 @@ func TestLargeStruct(t *testing.T) {
 func BenchmarkEncodeInt32(b *testing.B) {
 	m, _ := NewMad[int32]()
 	value := int32(42)
-	buffer := make([]byte, 4)
+	// FIX: Must account for the length of m.Code()
+	size := m.GetRequiredSize(&value)
+	buffer := make([]byte, size)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -248,9 +250,12 @@ func BenchmarkEncodeInt32(b *testing.B) {
 
 func BenchmarkDecodeInt32(b *testing.B) {
 	m, _ := NewMad[int32]()
-	buffer := []byte{0, 0, 0, 42}
-	var decoded int32
+	value := int32(42)
+	size := m.GetRequiredSize(&value)
+	buffer := make([]byte, size)
+	_ = m.Encode(&value, buffer) // FIX: Encode properly to include the header code
 
+	var decoded int32
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = m.Decode(buffer, &decoded)
@@ -261,7 +266,7 @@ func BenchmarkEncodeSmallArray(b *testing.B) {
 	type SmallArray = [4]int32
 	m, _ := NewMad[SmallArray]()
 	value := SmallArray{1, 2, 3, 4}
-	size := m.sizefunc(unsafe.Pointer(&value))
+	size := m.GetRequiredSize(&value)
 	buffer := make([]byte, size)
 
 	b.ResetTimer()
@@ -274,7 +279,7 @@ func BenchmarkDecodeSmallArray(b *testing.B) {
 	type SmallArray = [4]int32
 	m, _ := NewMad[SmallArray]()
 	value := SmallArray{1, 2, 3, 4}
-	size := m.sizefunc(unsafe.Pointer(&value))
+	size := m.GetRequiredSize(&value)
 	buffer := make([]byte, size)
 	m.Encode(&value, buffer)
 
@@ -292,7 +297,7 @@ func BenchmarkEncodeMediumArray(b *testing.B) {
 	for i := 0; i < 100; i++ {
 		value[i] = int32(i)
 	}
-	size := m.sizefunc(unsafe.Pointer(&value))
+	size := m.GetRequiredSize(&value)
 	buffer := make([]byte, size)
 
 	b.ResetTimer()
@@ -308,7 +313,7 @@ func BenchmarkDecodeMediumArray(b *testing.B) {
 	for i := 0; i < 100; i++ {
 		value[i] = int32(i)
 	}
-	size := m.sizefunc(unsafe.Pointer(&value))
+	size := m.GetRequiredSize(&value)
 	buffer := make([]byte, size)
 	m.Encode(&value, buffer)
 
@@ -326,7 +331,7 @@ func BenchmarkEncodeLargeArray(b *testing.B) {
 	for i := 0; i < 1000; i++ {
 		value[i] = int64(i * i)
 	}
-	size := m.sizefunc(unsafe.Pointer(&value))
+	size := m.GetRequiredSize(&value)
 	buffer := make([]byte, size)
 
 	b.ResetTimer()
@@ -342,7 +347,7 @@ func BenchmarkDecodeLargeArray(b *testing.B) {
 	for i := 0; i < 1000; i++ {
 		value[i] = int64(i * i)
 	}
-	size := m.sizefunc(unsafe.Pointer(&value))
+	size := m.GetRequiredSize(&value)
 	buffer := make([]byte, size)
 	m.Encode(&value, buffer)
 
@@ -357,7 +362,7 @@ func BenchmarkEncodeStringArray(b *testing.B) {
 	type StringArray = [8]string
 	m, _ := NewMad[StringArray]()
 	value := StringArray{"hello", "world", "test", "benchmark", "array", "string", "performance", "mad"}
-	size := m.sizefunc(unsafe.Pointer(&value))
+	size := m.GetRequiredSize(&value)
 	buffer := make([]byte, size)
 
 	b.ResetTimer()
@@ -370,7 +375,7 @@ func BenchmarkDecodeStringArray(b *testing.B) {
 	type StringArray = [8]string
 	m, _ := NewMad[StringArray]()
 	value := StringArray{"hello", "world", "test", "benchmark", "array", "string", "performance", "mad"}
-	size := m.sizefunc(unsafe.Pointer(&value))
+	size := m.GetRequiredSize(&value)
 	buffer := make([]byte, size)
 	m.Encode(&value, buffer)
 
@@ -390,7 +395,7 @@ func BenchmarkEncodeSimpleStruct(b *testing.B) {
 	}
 	m, _ := NewMad[SimpleStruct]()
 	value := SimpleStruct{A: 42, B: true, C: 3.14159}
-	size := m.sizefunc(unsafe.Pointer(&value))
+	size := m.GetRequiredSize(&value)
 	buffer := make([]byte, size)
 
 	b.ResetTimer()
@@ -407,7 +412,7 @@ func BenchmarkDecodeSimpleStruct(b *testing.B) {
 	}
 	m, _ := NewMad[SimpleStruct]()
 	value := SimpleStruct{A: 42, B: true, C: 3.14159}
-	size := m.sizefunc(unsafe.Pointer(&value))
+	size := m.GetRequiredSize(&value)
 	buffer := make([]byte, size)
 	m.Encode(&value, buffer)
 
@@ -436,7 +441,7 @@ func BenchmarkEncodeStructWithStrings(b *testing.B) {
 		UserID:   987654321,
 		Category: "premium",
 	}
-	size := m.sizefunc(unsafe.Pointer(&value))
+	size := m.GetRequiredSize(&value)
 	buffer := make([]byte, size)
 
 	b.ResetTimer()
@@ -463,7 +468,7 @@ func BenchmarkDecodeStructWithStrings(b *testing.B) {
 		UserID:   987654321,
 		Category: "premium",
 	}
-	size := m.sizefunc(unsafe.Pointer(&value))
+	size := m.GetRequiredSize(&value)
 	buffer := make([]byte, size)
 	m.Encode(&value, buffer)
 
@@ -499,7 +504,7 @@ func BenchmarkEncodeNestedStruct(b *testing.B) {
 		},
 		Active: true,
 	}
-	size := m.sizefunc(unsafe.Pointer(&value))
+	size := m.GetRequiredSize(&value)
 	buffer := make([]byte, size)
 
 	b.ResetTimer()
@@ -533,7 +538,7 @@ func BenchmarkDecodeNestedStruct(b *testing.B) {
 		},
 		Active: true,
 	}
-	size := m.sizefunc(unsafe.Pointer(&value))
+	size := m.GetRequiredSize(&value)
 	buffer := make([]byte, size)
 	m.Encode(&value, buffer)
 
@@ -558,7 +563,7 @@ func BenchmarkEncodeStructWithArray(b *testing.B) {
 		Scores: [10]float32{1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8, 9.9, 10.0},
 		Valid:  true,
 	}
-	size := m.sizefunc(unsafe.Pointer(&value))
+	size := m.GetRequiredSize(&value)
 	buffer := make([]byte, size)
 
 	b.ResetTimer()
@@ -581,7 +586,7 @@ func BenchmarkDecodeStructWithArray(b *testing.B) {
 		Scores: [10]float32{1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8, 9.9, 10.0},
 		Valid:  true,
 	}
-	size := m.sizefunc(unsafe.Pointer(&value))
+	size := m.GetRequiredSize(&value)
 	buffer := make([]byte, size)
 	m.Encode(&value, buffer)
 
@@ -601,8 +606,9 @@ func TestGetRequiredSize(t *testing.T) {
 		}
 		value := int32(42)
 		size := m.GetRequiredSize(&value)
-		if size != 4 {
-			t.Errorf("Expected 4 bytes for int32, got %d", size)
+		expected := 4 + 1 // 4 bytes for int32 + 1 byte for code "2"
+		if size != expected {
+			t.Errorf("Expected %d bytes for int32, got %d", expected, size)
 		}
 	})
 
@@ -613,7 +619,7 @@ func TestGetRequiredSize(t *testing.T) {
 		}
 		value := "hello"
 		size := m.GetRequiredSize(&value)
-		expected := 4 + len(value) // 4 bytes for length prefix + string bytes
+		expected := 4 + len(value) + 1 // 4 bytes for length prefix + string bytes + 1 byte for code "4"
 		if size != expected {
 			t.Errorf("Expected %d bytes for string %q, got %d", expected, value, size)
 		}
@@ -626,7 +632,7 @@ func TestGetRequiredSize(t *testing.T) {
 		}
 		value := [3]int32{1, 2, 3}
 		size := m.GetRequiredSize(&value)
-		expected := 3 * 4 // 3 int32s, 4 bytes each
+		expected := 3*4 + 2 // 3 int32s (4 bytes each) + 2 bytes for code "52"
 		if size != expected {
 			t.Errorf("Expected %d bytes for [3]int32, got %d", expected, size)
 		}
@@ -643,7 +649,7 @@ func TestGetRequiredSize(t *testing.T) {
 		}
 		value := SimpleStruct{A: 42, B: true}
 		size := m.GetRequiredSize(&value)
-		expected := 4 + 1 // int32 + bool
+		expected := 4 + 1 + 3 // int32 + bool + 3 bytes for code "720"
 		if size != expected {
 			t.Errorf("Expected %d bytes for SimpleStruct, got %d", expected, size)
 		}
@@ -658,7 +664,9 @@ func TestDecoderBufferUnderflow(t *testing.T) {
 			t.Fatalf("NewMad failed: %v", err)
 		}
 		var result int64
-		err = m.Decode([]byte{1, 2}, &result) // Only 2 bytes, need 8
+		// Include code "3" but not enough data bytes (need 8, provide only 2)
+		buffer := append(m.Code(), []byte{1, 2}...)
+		err = m.Decode(buffer, &result)
 		if err == nil {
 			t.Error("Expected buffer underflow error for int64")
 		}
@@ -673,7 +681,9 @@ func TestDecoderBufferUnderflow(t *testing.T) {
 			t.Fatalf("NewMad failed: %v", err)
 		}
 		var result int32
-		err = m.Decode([]byte{1, 2}, &result) // Only 2 bytes, need 4
+		// Include code "2" but not enough data bytes (need 4, provide only 2)
+		buffer := append(m.Code(), []byte{1, 2}...)
+		err = m.Decode(buffer, &result)
 		if err == nil {
 			t.Error("Expected buffer underflow error for int32")
 		}
@@ -685,7 +695,9 @@ func TestDecoderBufferUnderflow(t *testing.T) {
 			t.Fatalf("NewMad failed: %v", err)
 		}
 		var result int16
-		err = m.Decode([]byte{1}, &result) // Only 1 byte, need 2
+		// Include code "1" but not enough data bytes (need 2, provide only 1)
+		buffer := append(m.Code(), []byte{1}...)
+		err = m.Decode(buffer, &result)
 		if err == nil {
 			t.Error("Expected buffer underflow error for int16")
 		}
@@ -697,7 +709,9 @@ func TestDecoderBufferUnderflow(t *testing.T) {
 			t.Fatalf("NewMad failed: %v", err)
 		}
 		var result string
-		err = m.Decode([]byte{1, 2}, &result) // Only 2 bytes, need 4 for length
+		// Include code "4" but not enough data bytes (need 4 for length, provide only 2)
+		buffer := append(m.Code(), []byte{1, 2}...)
+		err = m.Decode(buffer, &result)
 		if err == nil {
 			t.Error("Expected buffer underflow error for string length")
 		}
@@ -709,8 +723,8 @@ func TestDecoderBufferUnderflow(t *testing.T) {
 			t.Fatalf("NewMad failed: %v", err)
 		}
 		var result string
-		// Length says 10 bytes, but only provide 2 after length prefix
-		buffer := []byte{0, 0, 0, 10, 'h', 'i'}
+		// Include code "4", length says 10 bytes, but only provide 2 after length prefix
+		buffer := append(m.Code(), []byte{0, 0, 0, 10, 'h', 'i'}...)
 		err = m.Decode(buffer, &result)
 		if err == nil {
 			t.Error("Expected buffer underflow error for string content")
@@ -997,7 +1011,7 @@ func TestBufferExactSizeBoundary(t *testing.T) {
 	}
 
 	value := int64(12345)
-	exactBuffer := make([]byte, 8) // Exactly the right size
+	exactBuffer := make([]byte, m.GetRequiredSize(&value)) // Exactly the right size
 
 	err = m.Encode(&value, exactBuffer)
 	if err != nil {
@@ -1055,8 +1069,9 @@ func TestCodeGeneration(t *testing.T) {
 			t.Fatalf("NewMad failed: %v", err)
 		}
 		code := m.Code()
-		if code != "2" { // fourByteStrat returns "2"
-			t.Errorf("Expected code '2' for int32, got '%s'", code)
+		expected := []byte("2") // fourByteStrat returns "2"
+		if !slices.Equal(code, expected) {
+			t.Errorf("Expected code %v for int32, got %v", expected, code)
 		}
 	})
 
@@ -1066,8 +1081,9 @@ func TestCodeGeneration(t *testing.T) {
 			t.Fatalf("NewMad failed: %v", err)
 		}
 		code := m.Code()
-		if code != "4" { // stringStrat returns "4"
-			t.Errorf("Expected code '4' for string, got '%s'", code)
+		expected := []byte("4") // stringStrat returns "4"
+		if !slices.Equal(code, expected) {
+			t.Errorf("Expected code %v for string, got %v", expected, code)
 		}
 	})
 
@@ -1077,8 +1093,9 @@ func TestCodeGeneration(t *testing.T) {
 			t.Fatalf("NewMad failed: %v", err)
 		}
 		code := m.Code()
-		if code != "0" { // byteStrat returns "0"
-			t.Errorf("Expected code '0' for bool, got '%s'", code)
+		expected := []byte("0") // byteStrat returns "0"
+		if !slices.Equal(code, expected) {
+			t.Errorf("Expected code %v for bool, got %v", expected, code)
 		}
 	})
 
@@ -1088,8 +1105,9 @@ func TestCodeGeneration(t *testing.T) {
 			t.Fatalf("NewMad failed: %v", err)
 		}
 		code := m.Code()
-		if code != "52" { // arrStrat returns "5" + element code "2"
-			t.Errorf("Expected code '52' for [3]int32, got '%s'", code)
+		expected := []byte("52") // arrStrat returns "5" + element code "2"
+		if !slices.Equal(code, expected) {
+			t.Errorf("Expected code %v for [3]int32, got %v", expected, code)
 		}
 	})
 
@@ -1104,8 +1122,9 @@ func TestCodeGeneration(t *testing.T) {
 		}
 		code := m.Code()
 		// Struct fields are sorted alphabetically: A (int32="2"), B (bool="0")
-		if code != "720" {
-			t.Errorf("Expected code '20' for TestStruct, got '%s'", code)
+		expected := []byte("720")
+		if !slices.Equal(code, expected) {
+			t.Errorf("Expected code %v for TestStruct, got %v", expected, code)
 		}
 	})
 
@@ -1124,8 +1143,9 @@ func TestCodeGeneration(t *testing.T) {
 		code := m.Code()
 		// Fields sorted: Inner (struct with int16="1"), Y (string="4")
 		// So code should be "1" + "4" = "14"
-		if code != "7714" {
-			t.Errorf("Expected code '14' for nested struct, got '%s'", code)
+		expected := []byte("7714")
+		if !slices.Equal(code, expected) {
+			t.Errorf("Expected code %v for nested struct, got %v", expected, code)
 		}
 	})
 }
@@ -1137,7 +1157,9 @@ func TestByteStrategyBufferUnderflow(t *testing.T) {
 		t.Fatalf("NewMad failed: %v", err)
 	}
 	var result int8
-	err = m.Decode([]byte{}, &result) // Empty buffer, need 1 byte
+	// Include code "0" but no data bytes (need 1 byte)
+	buffer := m.Code() // Only code, no data
+	err = m.Decode(buffer, &result)
 	if err == nil {
 		t.Error("Expected buffer underflow error for int8")
 	}
