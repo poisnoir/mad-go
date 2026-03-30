@@ -606,7 +606,7 @@ func TestGetRequiredSize(t *testing.T) {
 		}
 		value := int32(42)
 		size := m.GetRequiredSize(&value)
-		expected := 4 + 1 // 4 bytes for int32 + 1 byte for code "2"
+		expected := 4
 		if size != expected {
 			t.Errorf("Expected %d bytes for int32, got %d", expected, size)
 		}
@@ -619,7 +619,7 @@ func TestGetRequiredSize(t *testing.T) {
 		}
 		value := "hello"
 		size := m.GetRequiredSize(&value)
-		expected := 4 + len(value) + 1 // 4 bytes for length prefix + string bytes + 1 byte for code "4"
+		expected := 4 + len(value)
 		if size != expected {
 			t.Errorf("Expected %d bytes for string %q, got %d", expected, value, size)
 		}
@@ -632,7 +632,7 @@ func TestGetRequiredSize(t *testing.T) {
 		}
 		value := [3]int32{1, 2, 3}
 		size := m.GetRequiredSize(&value)
-		expected := 3*4 + 2 // 3 int32s (4 bytes each) + 2 bytes for code "52"
+		expected := 3 * 4
 		if size != expected {
 			t.Errorf("Expected %d bytes for [3]int32, got %d", expected, size)
 		}
@@ -649,7 +649,7 @@ func TestGetRequiredSize(t *testing.T) {
 		}
 		value := SimpleStruct{A: 42, B: true}
 		size := m.GetRequiredSize(&value)
-		expected := 4 + 1 + 3 // int32 + bool + 3 bytes for code "720"
+		expected := 4 + 1
 		if size != expected {
 			t.Errorf("Expected %d bytes for SimpleStruct, got %d", expected, size)
 		}
@@ -665,7 +665,7 @@ func TestDecoderBufferUnderflow(t *testing.T) {
 		}
 		var result int64
 		// Include code "3" but not enough data bytes (need 8, provide only 2)
-		buffer := append(m.Code(), []byte{1, 2}...)
+		buffer := []byte{1, 2}
 		err = m.Decode(buffer, &result)
 		if err == nil {
 			t.Error("Expected buffer underflow error for int64")
@@ -682,7 +682,7 @@ func TestDecoderBufferUnderflow(t *testing.T) {
 		}
 		var result int32
 		// Include code "2" but not enough data bytes (need 4, provide only 2)
-		buffer := append(m.Code(), []byte{1, 2}...)
+		buffer := []byte{1, 2}
 		err = m.Decode(buffer, &result)
 		if err == nil {
 			t.Error("Expected buffer underflow error for int32")
@@ -696,7 +696,7 @@ func TestDecoderBufferUnderflow(t *testing.T) {
 		}
 		var result int16
 		// Include code "1" but not enough data bytes (need 2, provide only 1)
-		buffer := append(m.Code(), []byte{1}...)
+		buffer := []byte{1}
 		err = m.Decode(buffer, &result)
 		if err == nil {
 			t.Error("Expected buffer underflow error for int16")
@@ -710,7 +710,7 @@ func TestDecoderBufferUnderflow(t *testing.T) {
 		}
 		var result string
 		// Include code "4" but not enough data bytes (need 4 for length, provide only 2)
-		buffer := append(m.Code(), []byte{1, 2}...)
+		buffer := []byte{1, 2}
 		err = m.Decode(buffer, &result)
 		if err == nil {
 			t.Error("Expected buffer underflow error for string length")
@@ -724,7 +724,7 @@ func TestDecoderBufferUnderflow(t *testing.T) {
 		}
 		var result string
 		// Include code "4", length says 10 bytes, but only provide 2 after length prefix
-		buffer := append(m.Code(), []byte{0, 0, 0, 10, 'h', 'i'}...)
+		buffer := []byte{0, 0, 0, 10, 'h', 'i'}
 		err = m.Decode(buffer, &result)
 		if err == nil {
 			t.Error("Expected buffer underflow error for string content")
@@ -1157,8 +1157,7 @@ func TestByteStrategyBufferUnderflow(t *testing.T) {
 		t.Fatalf("NewMad failed: %v", err)
 	}
 	var result int8
-	// Include code "0" but no data bytes (need 1 byte)
-	buffer := m.Code() // Only code, no data
+	var buffer []byte
 	err = m.Decode(buffer, &result)
 	if err == nil {
 		t.Error("Expected buffer underflow error for int8")

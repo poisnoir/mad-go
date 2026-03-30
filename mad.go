@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"reflect"
-	"slices"
 	"sort"
 	"unsafe"
 )
@@ -40,32 +39,19 @@ func NewMad[T any]() (*Mad[T], error) {
 }
 
 func (m *Mad[T]) GetRequiredSize(input *T) int {
-	return m.sizefunc(unsafe.Pointer(input)) + len(m.code)
+	return m.sizefunc(unsafe.Pointer(input))
 }
 
 func (m *Mad[T]) Encode(input *T, output []byte) (err error) {
 	if len(output) < m.GetRequiredSize(input) {
 		return fmt.Errorf("output buffer too small")
 	}
-	buf := &output
-	copy((*buf)[:], m.code) // adding the code of structure to buffer
-
-	*buf = (*buf)[len(m.code):]
-	m.encoder(unsafe.Pointer(input), buf)
+	m.encoder(unsafe.Pointer(input), &output)
 	return nil
 }
 
 func (m *Mad[T]) Decode(input []byte, output *T) (err error) {
-	if len(input) < len(m.code) {
-		return fmt.Errorf("buffer is either corrupted or generated from different data type")
-	}
-	if !slices.Equal(input[:len(m.code)], m.code) {
-		return fmt.Errorf("buffer is either corrupted or generated from different data type")
-	}
-	buf := &input
-	*buf = input[len(m.code):]
-
-	return m.decoder(unsafe.Pointer(output), buf)
+	return m.decoder(unsafe.Pointer(output), &input)
 }
 
 func generateFuncs(typ reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int, error, string) {
@@ -348,4 +334,77 @@ func structStrat(t reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Poi
 			}
 			return total
 		}, nil, code
+}
+
+func mapStart(t reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int, error, string) {
+
+	keyType := t.Key()
+	valueType := t.Elem()
+
+	encKeyFn, decKeyFn, sizeKeyFn, err, keyCode := generateFuncs(keyType)
+	if err != nil {
+		return nil, nil, nil, err, ""
+	}
+	encValueFn, decValueFn, sizeValueFn, err, valueCode := generateFuncs(valueType)
+	if err != nil {
+		return nil, nil, nil, err, ""
+	}
+
+	return func(pointer unsafe.Pointer, buffer *[]byte) {
+			rv := reflect.NewAt(t, pointer).Elem()
+			if rv.IsNil() {
+				binary.BigEndian.PutUint32((*buffer)[0:4], 0)
+				*buffer = (*buffer)[4:]
+				return
+			}
+
+			// Write count
+			itemsNum := rv.Len()
+			binary.BigEndian.PutUint32((*buffer)[0:4], uint32(itemsNum))
+
+			// Advance the main buffer past the count
+			*buffer = (*buffer)[4:]
+
+			iter := rv.MapRange()
+			for iter.Next() {
+				// Pass the original buffer pointer so it continues to slide
+				encKeyFn(unsafe.Pointer(iter.Key().UnsafeAddr()), buffer)
+				encValueFn(unsafe.Pointer(iter.Value().UnsafeAddr()), buffer)
+			}
+		}, func(pointer unsafe.Pointer, buffer *[]byte) error {
+			if len(*buffer) < 4 {
+				return fmt.Errorf("buffer too small")
+			}
+			count := int(binary.BigEndian.Uint32((*buffer)[0:4]))
+			*buffer = (*buffer)[4:]
+
+			// Create the map
+			newMap := reflect.MakeMapWithSize(t, count)
+
+			for i := 0; i < count; i++ {
+				// Create addressable temps for Key and Value
+				kTmp := reflect.New(keyType).Elem()
+				vTmp := reflect.New(valueType).Elem()
+
+				if err := decKeyFn(unsafe.Pointer(kTmp.UnsafeAddr()), buffer); err != nil {
+					return err
+				}
+				if err := decValueFn(unsafe.Pointer(vTmp.UnsafeAddr()), buffer); err != nil {
+					return err
+				}
+				newMap.SetMapIndex(kTmp, vTmp)
+			}
+
+			// Set the pointer to the new map header
+			*(*unsafe.Pointer)(pointer) = unsafe.Pointer(newMap.Pointer())
+			return nil
+		}, func(pointer unsafe.Pointer) int {
+			result := 0
+			rv := reflect.NewAt(t, pointer).Elem()
+			iter := rv.MapRange()
+			for iter.Next() {
+				result += sizeKeyFn(unsafe.Pointer(iter.Key().UnsafeAddr())) + sizeValueFn(unsafe.Pointer(iter.Value().Pointer()))
+			}
+			return result + 4
+		}, nil, "8" + keyCode + valueCode
 }
