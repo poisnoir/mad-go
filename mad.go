@@ -81,6 +81,8 @@ func generateFuncs(typ reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe
 		enc, dec, size, err, code = structStrat(typ)
 	case reflect.Array:
 		enc, dec, size, err, code = arrStrat(typ)
+	case reflect.Map:
+		enc, dec, size, err, code = mapStrat(typ)
 	// Todo: Current implementation use slice header
 	// I am not sure how safe it is since it is deprecated.
 	// case reflect.Slice:
@@ -336,7 +338,7 @@ func structStrat(t reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Poi
 		}, nil, code
 }
 
-func mapStart(t reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int, error, string) {
+func mapStrat(t reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int, error, string) {
 
 	keyType := t.Key()
 	valueType := t.Elem()
@@ -353,58 +355,71 @@ func mapStart(t reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Pointe
 	return func(pointer unsafe.Pointer, buffer *[]byte) {
 			rv := reflect.NewAt(t, pointer).Elem()
 			if rv.IsNil() {
-				binary.BigEndian.PutUint32((*buffer)[0:4], 0)
+				// Ensure buffer has space before writing
+				binary.BigEndian.PutUint32((*buffer)[:4], 0)
 				*buffer = (*buffer)[4:]
 				return
 			}
 
-			// Write count
-			itemsNum := rv.Len()
-			binary.BigEndian.PutUint32((*buffer)[0:4], uint32(itemsNum))
-
-			// Advance the main buffer past the count
+			binary.BigEndian.PutUint32((*buffer)[:4], uint32(rv.Len()))
 			*buffer = (*buffer)[4:]
 
 			iter := rv.MapRange()
 			for iter.Next() {
-				// Pass the original buffer pointer so it continues to slide
-				encKeyFn(unsafe.Pointer(iter.Key().UnsafeAddr()), buffer)
-				encValueFn(unsafe.Pointer(iter.Value().UnsafeAddr()), buffer)
+				// Fix: Keys/Values from MapRange are not addressable.
+				// We must move them to addressable space to get a pointer.
+				k := reflect.New(keyType).Elem()
+				k.Set(iter.Key())
+				v := reflect.New(valueType).Elem()
+				v.Set(iter.Value())
+
+				encKeyFn(k.Addr().UnsafePointer(), buffer)
+				encValueFn(v.Addr().UnsafePointer(), buffer)
 			}
-		}, func(pointer unsafe.Pointer, buffer *[]byte) error {
+		},
+		func(pointer unsafe.Pointer, buffer *[]byte) error {
 			if len(*buffer) < 4 {
 				return fmt.Errorf("buffer too small")
 			}
-			count := int(binary.BigEndian.Uint32((*buffer)[0:4]))
+			count := int(binary.BigEndian.Uint32((*buffer)[:4]))
 			*buffer = (*buffer)[4:]
 
-			// Create the map
 			newMap := reflect.MakeMapWithSize(t, count)
 
 			for i := 0; i < count; i++ {
-				// Create addressable temps for Key and Value
 				kTmp := reflect.New(keyType).Elem()
 				vTmp := reflect.New(valueType).Elem()
 
-				if err := decKeyFn(unsafe.Pointer(kTmp.UnsafeAddr()), buffer); err != nil {
+				if err := decKeyFn(kTmp.Addr().UnsafePointer(), buffer); err != nil {
 					return err
 				}
-				if err := decValueFn(unsafe.Pointer(vTmp.UnsafeAddr()), buffer); err != nil {
+				if err := decValueFn(vTmp.Addr().UnsafePointer(), buffer); err != nil {
 					return err
 				}
 				newMap.SetMapIndex(kTmp, vTmp)
 			}
 
-			// Set the pointer to the new map header
-			*(*unsafe.Pointer)(pointer) = unsafe.Pointer(newMap.Pointer())
+			// Fix: Use reflection to set the value to trigger GC write barriers
+			reflect.NewAt(t, pointer).Elem().Set(newMap)
 			return nil
-		}, func(pointer unsafe.Pointer) int {
-			result := 0
+		},
+		func(pointer unsafe.Pointer) int {
 			rv := reflect.NewAt(t, pointer).Elem()
+			if rv.IsNil() {
+				return 4
+			} // Still need 4 bytes for the "0" length
+
+			result := 4
 			iter := rv.MapRange()
 			for iter.Next() {
-				result += sizeKeyFn(unsafe.Pointer(iter.Key().UnsafeAddr())) + sizeValueFn(unsafe.Pointer(iter.Value().Pointer()))
+				// Again, move to addressable space for the size function
+				k := reflect.New(keyType).Elem()
+				k.Set(iter.Key())
+				v := reflect.New(valueType).Elem()
+				v.Set(iter.Value())
+
+				result += sizeKeyFn(k.Addr().UnsafePointer()) + sizeValueFn(v.Addr().UnsafePointer())
 			}
-			return result + 4
+			return result
 		}, nil, "8" + keyCode + valueCode
 }

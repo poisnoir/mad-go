@@ -234,6 +234,97 @@ func TestLargeStruct(t *testing.T) {
 	testRoundTrip(t, large)
 }
 
+func TestMap(t *testing.T) {
+	t.Run("string_int_map", func(t *testing.T) {
+		m, err := NewMad[map[string]int32]()
+		if err != nil {
+			t.Fatalf("NewMad failed: %v", err)
+		}
+
+		original := map[string]int32{
+			"one":   1,
+			"two":   2,
+			"three": 3,
+		}
+
+		size := m.GetRequiredSize(&original)
+		buffer := make([]byte, size)
+
+		err = m.Encode(&original, buffer)
+		if err != nil {
+			t.Fatalf("Encode failed: %v", err)
+		}
+
+		var decoded map[string]int32
+		err = m.Decode(buffer, &decoded)
+		if err != nil {
+			t.Fatalf("Decode failed: %v", err)
+		}
+
+		if len(decoded) != len(original) {
+			t.Errorf("Length mismatch: expected %d, got %d", len(original), len(decoded))
+		}
+
+		for k, v := range original {
+			if decoded[k] != v {
+				t.Errorf("Value mismatch for key %s: expected %d, got %d", k, v, decoded[k])
+			}
+		}
+	})
+
+	t.Run("empty_map", func(t *testing.T) {
+		m, err := NewMad[map[string]string]()
+		if err != nil {
+			t.Fatalf("NewMad failed: %v", err)
+		}
+
+		original := make(map[string]string)
+		size := m.GetRequiredSize(&original)
+		buffer := make([]byte, size)
+
+		err = m.Encode(&original, buffer)
+		if err != nil {
+			t.Fatalf("Encode failed: %v", err)
+		}
+
+		var decoded map[string]string
+		err = m.Decode(buffer, &decoded)
+		if err != nil {
+			t.Fatalf("Decode failed: %v", err)
+		}
+
+		if len(decoded) != 0 {
+			t.Errorf("Expected empty map, got length %d", len(decoded))
+		}
+	})
+
+	t.Run("nil_map", func(t *testing.T) {
+		m, err := NewMad[map[int32]int32]()
+		if err != nil {
+			t.Fatalf("NewMad failed: %v", err)
+		}
+
+		var original map[int32]int32 = nil
+		size := m.GetRequiredSize(&original)
+		buffer := make([]byte, size)
+
+		err = m.Encode(&original, buffer)
+		if err != nil {
+			t.Fatalf("Encode failed: %v", err)
+		}
+
+		var decoded map[int32]int32
+		err = m.Decode(buffer, &decoded)
+		if err != nil {
+			t.Fatalf("Decode failed: %v", err)
+		}
+
+		if decoded != nil && len(decoded) != 0 {
+			t.Errorf("Expected nil or empty map, got length %d", len(decoded))
+		}
+	})
+}
+
 // Benchmark tests
 func BenchmarkEncodeInt32(b *testing.B) {
 	m, _ := NewMad[int32]()
