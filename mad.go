@@ -339,87 +339,101 @@ func structStrat(t reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Poi
 }
 
 func mapStrat(t reflect.Type) (func(unsafe.Pointer, *[]byte), func(unsafe.Pointer, *[]byte) error, func(unsafe.Pointer) int, error, string) {
-
 	keyType := t.Key()
-	valueType := t.Elem()
+	valType := t.Elem()
 
 	encKeyFn, decKeyFn, sizeKeyFn, err, keyCode := generateFuncs(keyType)
+	encValFn, decValFn, sizeValFn, err, valCode := generateFuncs(valType)
 	if err != nil {
 		return nil, nil, nil, err, ""
 	}
-	encValueFn, decValueFn, sizeValueFn, err, valueCode := generateFuncs(valueType)
-	if err != nil {
-		return nil, nil, nil, err, ""
+
+	// --- ENCODER ---
+	encoder := func(pointer unsafe.Pointer, buffer *[]byte) {
+		rv := reflect.NewAt(t, pointer).Elem()
+		if rv.IsNil() {
+			binary.BigEndian.PutUint32((*buffer)[:4], 0)
+			*buffer = (*buffer)[4:]
+			return
+		}
+
+		binary.BigEndian.PutUint32((*buffer)[:4], uint32(rv.Len()))
+		*buffer = (*buffer)[4:]
+
+		// Local buffers: Created once per Encode call, NOT once per map item.
+		// This makes it thread-safe.
+		kPtrVal := reflect.New(keyType)
+		vPtrVal := reflect.New(valType)
+		kUnsafePtr := kPtrVal.UnsafePointer()
+		vUnsafePtr := vPtrVal.UnsafePointer()
+		kElem := kPtrVal.Elem()
+		vElem := vPtrVal.Elem()
+
+		iter := rv.MapRange()
+		for iter.Next() {
+			kElem.Set(iter.Key())
+			vElem.Set(iter.Value())
+			encKeyFn(kUnsafePtr, buffer)
+			encValFn(vUnsafePtr, buffer)
+		}
 	}
 
-	return func(pointer unsafe.Pointer, buffer *[]byte) {
-			rv := reflect.NewAt(t, pointer).Elem()
-			if rv.IsNil() {
-				// Ensure buffer has space before writing
-				binary.BigEndian.PutUint32((*buffer)[:4], 0)
-				*buffer = (*buffer)[4:]
-				return
+	// --- DECODER ---
+	decoder := func(pointer unsafe.Pointer, buffer *[]byte) error {
+		if len(*buffer) < 4 {
+			return fmt.Errorf("buffer too small")
+		}
+		count := int(binary.BigEndian.Uint32((*buffer)[:4]))
+		*buffer = (*buffer)[4:]
+
+		newMap := reflect.MakeMapWithSize(t, count)
+
+		// Local buffers for decoding
+		kPtrVal := reflect.New(keyType)
+		vPtrVal := reflect.New(valType)
+		kUnsafePtr := kPtrVal.UnsafePointer()
+		vUnsafePtr := vPtrVal.UnsafePointer()
+		kElem := kPtrVal.Elem()
+		vElem := vPtrVal.Elem()
+
+		for i := 0; i < count; i++ {
+			if err := decKeyFn(kUnsafePtr, buffer); err != nil {
+				return err
 			}
-
-			binary.BigEndian.PutUint32((*buffer)[:4], uint32(rv.Len()))
-			*buffer = (*buffer)[4:]
-
-			iter := rv.MapRange()
-			for iter.Next() {
-				// Fix: Keys/Values from MapRange are not addressable.
-				// We must move them to addressable space to get a pointer.
-				k := reflect.New(keyType).Elem()
-				k.Set(iter.Key())
-				v := reflect.New(valueType).Elem()
-				v.Set(iter.Value())
-
-				encKeyFn(k.Addr().UnsafePointer(), buffer)
-				encValueFn(v.Addr().UnsafePointer(), buffer)
+			if err := decValFn(vUnsafePtr, buffer); err != nil {
+				return err
 			}
-		},
-		func(pointer unsafe.Pointer, buffer *[]byte) error {
-			if len(*buffer) < 4 {
-				return fmt.Errorf("buffer too small")
-			}
-			count := int(binary.BigEndian.Uint32((*buffer)[:4]))
-			*buffer = (*buffer)[4:]
+			newMap.SetMapIndex(kElem, vElem)
+		}
 
-			newMap := reflect.MakeMapWithSize(t, count)
+		reflect.NewAt(t, pointer).Elem().Set(newMap)
+		return nil
+	}
 
-			for i := 0; i < count; i++ {
-				kTmp := reflect.New(keyType).Elem()
-				vTmp := reflect.New(valueType).Elem()
+	// --- SIZEFUNC ---
+	sizefunc := func(pointer unsafe.Pointer) int {
+		rv := reflect.NewAt(t, pointer).Elem()
+		if rv.IsNil() {
+			return 4
+		}
 
-				if err := decKeyFn(kTmp.Addr().UnsafePointer(), buffer); err != nil {
-					return err
-				}
-				if err := decValueFn(vTmp.Addr().UnsafePointer(), buffer); err != nil {
-					return err
-				}
-				newMap.SetMapIndex(kTmp, vTmp)
-			}
+		// Local buffers for size calculation
+		kPtrVal := reflect.New(keyType)
+		vPtrVal := reflect.New(valType)
+		kUnsafePtr := kPtrVal.UnsafePointer()
+		vUnsafePtr := vPtrVal.UnsafePointer()
+		kElem := kPtrVal.Elem()
+		vElem := vPtrVal.Elem()
 
-			// Fix: Use reflection to set the value to trigger GC write barriers
-			reflect.NewAt(t, pointer).Elem().Set(newMap)
-			return nil
-		},
-		func(pointer unsafe.Pointer) int {
-			rv := reflect.NewAt(t, pointer).Elem()
-			if rv.IsNil() {
-				return 4
-			} // Still need 4 bytes for the "0" length
+		total := 4
+		iter := rv.MapRange()
+		for iter.Next() {
+			kElem.Set(iter.Key())
+			vElem.Set(iter.Value())
+			total += sizeKeyFn(kUnsafePtr) + sizeValFn(vUnsafePtr)
+		}
+		return total
+	}
 
-			result := 4
-			iter := rv.MapRange()
-			for iter.Next() {
-				// Again, move to addressable space for the size function
-				k := reflect.New(keyType).Elem()
-				k.Set(iter.Key())
-				v := reflect.New(valueType).Elem()
-				v.Set(iter.Value())
-
-				result += sizeKeyFn(k.Addr().UnsafePointer()) + sizeValueFn(v.Addr().UnsafePointer())
-			}
-			return result
-		}, nil, "8" + keyCode + valueCode
+	return encoder, decoder, sizefunc, nil, "8" + keyCode + valCode
 }
